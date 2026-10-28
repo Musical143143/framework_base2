@@ -1,0 +1,232 @@
+From 1c6909641870f56b524cbf4ffc9b2ed0cfe8a9b9 Mon Sep 17 00:00:00 2001
+From: Musical143143 <basub4615@gmail.com>
+Date: Wed, 28 Oct 2026 10:57:34 +0530
+Subject: [PATCH 1/2] SystemUI: add music chip to status bar island
+
+Adds MusicChipViewModel, which mirrors the active media session (title and
+app icon) as a secondary ongoing-activity chip. It ranks after the primary
+chips so it shows as the second chip when another activity is active.
+Gated by the music_dynamic_island_enabled system setting (default on).
+
+---
+ .../music/ui/viewmodel/MusicChipViewModel.kt  | 98 +++++++++++++++++++
+ .../OngoingActivityChipsViewModel.kt          | 10 +-
+ .../ui/viewmodel/MusicChipViewModelKosmos.kt  | 31 ++++++
+ .../OngoingActivityChipsViewModelKosmos.kt    |  2 +
+ 4 files changed, 140 insertions(+), 1 deletion(-)
+ create mode 100644 packages/SystemUI/src/com/android/systemui/statusbar/chips/music/ui/viewmodel/MusicChipViewModel.kt
+ create mode 100644 packages/SystemUI/tests/utils/src/com/android/systemui/statusbar/chips/music/ui/viewmodel/MusicChipViewModelKosmos.kt
+
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/chips/music/ui/viewmodel/MusicChipViewModel.kt b/packages/SystemUI/src/com/android/systemui/statusbar/chips/music/ui/viewmodel/MusicChipViewModel.kt
+new file mode 100644
+index 000000000000..9b62b5f03ce6
+--- /dev/null
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/chips/music/ui/viewmodel/MusicChipViewModel.kt
+@@ -0,0 +1,98 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.systemui.statusbar.chips.music.ui.viewmodel
++
++import android.content.Context
++import android.provider.Settings
++import androidx.compose.runtime.snapshotFlow
++import com.android.systemui.dagger.SysUISingleton
++import com.android.systemui.dagger.qualifiers.Application
++import com.android.systemui.dagger.qualifiers.Main
++import com.android.systemui.media.remedia.data.model.MediaDataModel
++import com.android.systemui.media.remedia.data.repository.MediaRepository
++import com.android.systemui.statusbar.chips.ui.model.ColorsModel
++import com.android.systemui.statusbar.chips.ui.model.OngoingActivityChipModel
++import com.android.systemui.statusbar.chips.ui.viewmodel.OngoingActivityChipViewModel
++import javax.inject.Inject
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.flow.Flow
++import kotlinx.coroutines.flow.SharingStarted
++import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.flow.map
++import kotlinx.coroutines.flow.stateIn
++
++/**
++ * View model for the "now playing" music chip shown in the status bar island.
++ *
++ * The chip mirrors the most recent active media session (title + app icon). It is ranked as a
++ * secondary chip, so it appears next to a call or notification chip when one is present, and on
++ * its own otherwise. It can be turned off with the [SETTING_KEY] secure setting.
++ */
++@SysUISingleton
++class MusicChipViewModel
++@Inject
++constructor(
++    @Application private val scope: CoroutineScope,
++    @Main private val context: Context,
++    private val mediaRepository: MediaRepository,
++) : OngoingActivityChipViewModel {
++
++    /** The first active media session, or null when nothing is playing. */
++    private val activeMedia: Flow<MediaDataModel?> = snapshotFlow {
++        mediaRepository.currentMedia.firstOrNull { it.isActive }
++    }
++
++    override val chip: StateFlow<OngoingActivityChipModel> =
++        activeMedia
++            .map { media ->
++                if (media == null || !isEnabled()) {
++                    OngoingActivityChipModel.Inactive()
++                } else {
++                    media.toChipModel()
++                }
++            }
++            // See b/347726238 for [SharingStarted.Lazily] reasoning.
++            .stateIn(scope, SharingStarted.Lazily, OngoingActivityChipModel.Inactive())
++
++    private fun isEnabled(): Boolean =
++        try {
++            Settings.System.getInt(context.contentResolver, SETTING_KEY, ENABLED_BY_DEFAULT) == 1
++        } catch (e: RuntimeException) {
++            ENABLED_BY_DEFAULT == 1
++        }
++
++    private fun MediaDataModel.toChipModel(): OngoingActivityChipModel.Active {
++        return OngoingActivityChipModel.Active(
++            key = KEY,
++            notificationKey = null, // Not tied to a notification
++            icon = OngoingActivityChipModel.ChipIcon.SingleColorIcon(appIcon),
++            content = OngoingActivityChipModel.Content.Text(title),
++            colors = ColorsModel.SystemThemed,
++            clickBehavior = OngoingActivityChipModel.ClickBehavior.None,
++        )
++    }
++
++    companion object {
++        /** Key used as the chip identity so the island can animate updates in place. */
++        const val KEY = "MusicChip"
++
++        /** System setting (0 = off, 1 = on) that the Settings app writes to. */
++        const val SETTING_KEY = "music_dynamic_island_enabled"
++
++        private const val ENABLED_BY_DEFAULT = 1
++    }
++}
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/chips/ui/viewmodel/OngoingActivityChipsViewModel.kt b/packages/SystemUI/src/com/android/systemui/statusbar/chips/ui/viewmodel/OngoingActivityChipsViewModel.kt
+index fa11ffd80b3d..d0e5d06c10be 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/chips/ui/viewmodel/OngoingActivityChipsViewModel.kt
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/chips/ui/viewmodel/OngoingActivityChipsViewModel.kt
+@@ -30,6 +30,7 @@ import com.android.systemui.statusbar.chips.call.ui.viewmodel.CallChipViewModel
+ import com.android.systemui.statusbar.chips.casttootherdevice.ui.viewmodel.CastToOtherDeviceChipViewModel
+ import com.android.systemui.statusbar.chips.notification.ui.viewmodel.NotifChipsViewModel
+ import com.android.systemui.statusbar.chips.screenrecord.ui.viewmodel.ScreenRecordChipViewModel
++import com.android.systemui.statusbar.chips.music.ui.viewmodel.MusicChipViewModel
+ import com.android.systemui.statusbar.chips.sharetoapp.ui.viewmodel.ShareToAppChipViewModel
+ import com.android.systemui.statusbar.chips.ui.model.MultipleOngoingActivityChipsModel
+ import com.android.systemui.statusbar.chips.ui.model.OngoingActivityChipModel
+@@ -62,6 +63,7 @@ constructor(
+     castToOtherDeviceChipViewModel: CastToOtherDeviceChipViewModel,
+     callChipViewModel: CallChipViewModel,
+     notifChipsViewModel: NotifChipsViewModel,
++    private val musicChipViewModel: MusicChipViewModel,
+     @DisplayAware displayStateInteractor: DisplayStateInteractor,
+     private val screenCaptureRecordFeaturesInteractor: ScreenCaptureRecordFeaturesInteractor,
+     private val chipsRefiners: Set<@JvmSuppressWildcards OngoingActivityChipsRefiner>,
+@@ -103,6 +105,7 @@ constructor(
+         val shareToApp: OngoingActivityChipModel = OngoingActivityChipModel.Inactive(),
+         val castToOtherDevice: OngoingActivityChipModel = OngoingActivityChipModel.Inactive(),
+         val call: OngoingActivityChipModel = OngoingActivityChipModel.Inactive(),
++        val music: OngoingActivityChipModel = OngoingActivityChipModel.Inactive(),
+         val notifs: List<OngoingActivityChipModel.Active> = emptyList(),
+     )
+ 
+@@ -147,6 +150,9 @@ constructor(
+                     )
+                 }
+             }
++            // The music chip is combined separately so the main combine stays within the typed
++            // 5-flow overloads.
++            .combine(musicChipViewModel.chip) { bundle, music -> bundle.copy(music = music) }
+             // Some of the chips could have timers in them and we don't want the start time for
+             // those timers to get reset for any reason. So, as soon as any subscriber has requested
+             // the chip information, we maintain it forever by using [SharingStarted.Lazily].
+@@ -327,7 +333,9 @@ constructor(
+         val inactiveChips = mutableListOf<OngoingActivityChipModel.Inactive>()
+ 
+         val sortedChips =
+-            with(bundle) { listOf(screenRecord, shareToApp, castToOtherDevice, call) + notifs }
++            // The music chip ranks just after the primary chips, so it becomes the second chip
++            // on the island whenever something more important is also active.
++            with(bundle) { listOf(screenRecord, shareToApp, castToOtherDevice, call, music) + notifs }
+ 
+         var shownSlotsRemaining = MAX_VISIBLE_CHIPS
+         for (chip in sortedChips) {
+diff --git a/packages/SystemUI/tests/utils/src/com/android/systemui/statusbar/chips/music/ui/viewmodel/MusicChipViewModelKosmos.kt b/packages/SystemUI/tests/utils/src/com/android/systemui/statusbar/chips/music/ui/viewmodel/MusicChipViewModelKosmos.kt
+new file mode 100644
+index 000000000000..47538dab550e
+--- /dev/null
++++ b/packages/SystemUI/tests/utils/src/com/android/systemui/statusbar/chips/music/ui/viewmodel/MusicChipViewModelKosmos.kt
+@@ -0,0 +1,31 @@
++/*
++ * Copyright (C) 2024 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.systemui.statusbar.chips.music.ui.viewmodel
++
++import android.content.applicationContext
++import com.android.systemui.kosmos.Kosmos
++import com.android.systemui.kosmos.applicationCoroutineScope
++import com.android.systemui.media.remedia.data.repository.mediaRepository
++
++val Kosmos.musicChipViewModel: MusicChipViewModel by
++    Kosmos.Fixture {
++        MusicChipViewModel(
++            scope = applicationCoroutineScope,
++            context = applicationContext,
++            mediaRepository = mediaRepository,
++        )
++    }
+diff --git a/packages/SystemUI/tests/utils/src/com/android/systemui/statusbar/chips/ui/viewmodel/OngoingActivityChipsViewModelKosmos.kt b/packages/SystemUI/tests/utils/src/com/android/systemui/statusbar/chips/ui/viewmodel/OngoingActivityChipsViewModelKosmos.kt
+index 8b63736ed876..456f58f411a7 100644
+--- a/packages/SystemUI/tests/utils/src/com/android/systemui/statusbar/chips/ui/viewmodel/OngoingActivityChipsViewModelKosmos.kt
++++ b/packages/SystemUI/tests/utils/src/com/android/systemui/statusbar/chips/ui/viewmodel/OngoingActivityChipsViewModelKosmos.kt
+@@ -22,6 +22,7 @@ import com.android.systemui.kosmos.testScope
+ import com.android.systemui.screencapture.record.domain.interactor.screenCaptureRecordFeaturesInteractor
+ import com.android.systemui.statusbar.chips.call.ui.viewmodel.callChipViewModel
+ import com.android.systemui.statusbar.chips.casttootherdevice.ui.viewmodel.castToOtherDeviceChipViewModel
++import com.android.systemui.statusbar.chips.music.ui.viewmodel.musicChipViewModel
+ import com.android.systemui.statusbar.chips.notification.ui.viewmodel.notifChipsViewModel
+ import com.android.systemui.statusbar.chips.screenrecord.ui.viewmodel.screenRecordChipViewModel
+ import com.android.systemui.statusbar.chips.sharetoapp.ui.viewmodel.shareToAppChipViewModel
+@@ -36,6 +37,7 @@ val Kosmos.ongoingActivityChipsViewModel: OngoingActivityChipsViewModel by
+             castToOtherDeviceChipViewModel = castToOtherDeviceChipViewModel,
+             callChipViewModel = callChipViewModel,
+             notifChipsViewModel = notifChipsViewModel,
++            musicChipViewModel = musicChipViewModel,
+             displayStateInteractor = displayStateInteractor,
+             screenCaptureRecordFeaturesInteractor = screenCaptureRecordFeaturesInteractor,
+             chipsRefiners = chipsRefinerSet,
+-- 
+2.43.0
+

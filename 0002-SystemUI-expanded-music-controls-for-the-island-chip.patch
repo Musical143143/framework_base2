@@ -1,0 +1,362 @@
+From aa08a7c30c21394f2f87aa346261c11601802dcf Mon Sep 17 00:00:00 2001
+From: Musical143143 <basub4615@gmail.com>
+Date: Wed, 28 Oct 2026 11:04:03 +0530
+Subject: [PATCH 2/2] SystemUI: expanded music controls for the island chip
+
+Tapping the music chip opens a card with title, subtitle, a seek bar with
+elapsed/total time, and previous, play/pause and next buttons. The card
+re-reads the session every 500 ms and dismisses when the session ends.
+Built in code and not compiled yet.
+
+---
+ .../ui/view/MusicControlsDialogDelegate.kt    | 220 ++++++++++++++++++
+ .../music/ui/viewmodel/MusicChipViewModel.kt  |  44 +++-
+ .../ui/viewmodel/MusicChipViewModelKosmos.kt  |   8 +
+ 3 files changed, 271 insertions(+), 1 deletion(-)
+ create mode 100644 packages/SystemUI/src/com/android/systemui/statusbar/chips/music/ui/view/MusicControlsDialogDelegate.kt
+
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/chips/music/ui/view/MusicControlsDialogDelegate.kt b/packages/SystemUI/src/com/android/systemui/statusbar/chips/music/ui/view/MusicControlsDialogDelegate.kt
+new file mode 100644
+index 000000000000..939dfe9bc213
+--- /dev/null
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/chips/music/ui/view/MusicControlsDialogDelegate.kt
+@@ -0,0 +1,220 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.systemui.statusbar.chips.music.ui.view
++
++import android.content.Context
++import android.graphics.Typeface
++import android.os.Bundle
++import android.os.Handler
++import android.os.Looper
++import android.text.TextUtils
++import android.view.View
++import android.widget.ImageButton
++import android.widget.LinearLayout
++import android.widget.SeekBar
++import android.widget.TextView
++import com.android.systemui.media.controls.shared.model.MediaAction
++import com.android.systemui.media.remedia.data.model.MediaDataModel
++import com.android.systemui.statusbar.phone.SystemUIDialog
++import com.android.systemui.statusbar.phone.SystemUIDialogFactory
++
++/**
++ * Expanded "now playing" card shown when the music island chip is tapped.
++ *
++ * Shows the title and subtitle, a seek bar with elapsed/total time, and previous, play/pause and
++ * next buttons. The card re-reads the session every [REFRESH_MS] so progress and button state stay
++ * live, and it dismisses itself once the session goes away.
++ *
++ * @param currentMedia returns the latest state of the session this card controls, or null if the
++ *   session is gone.
++ * @param seekTo seeks the session to the given position in milliseconds.
++ */
++class MusicControlsDialogDelegate(
++    private val context: Context,
++    private val dialogFactory: SystemUIDialogFactory,
++    private val currentMedia: () -> MediaDataModel?,
++    private val seekTo: (Long) -> Unit,
++) : SystemUIDialog.Delegate {
++
++    private val handler = Handler(Looper.getMainLooper())
++    private var ticker: Runnable? = null
++    private var dialog: SystemUIDialog? = null
++    private var isDragging = false
++
++    private lateinit var titleView: TextView
++    private lateinit var subtitleView: TextView
++    private lateinit var timeView: TextView
++    private lateinit var seekBar: SeekBar
++    private lateinit var prevButton: ImageButton
++    private lateinit var playButton: ImageButton
++    private lateinit var nextButton: ImageButton
++
++    override fun createDialog(): SystemUIDialog {
++        return dialogFactory.create(context, dialogDelegate = this)
++    }
++
++    override fun beforeCreate(dialog: SystemUIDialog, savedInstanceState: Bundle?) {
++        this.dialog = dialog
++        dialog.setContentView(buildView(dialog.context))
++        dialog.setOnDismissListener { stopTicker() }
++        // The first refresh happens right away so the card is never shown empty.
++        refresh()
++        startTicker()
++    }
++
++    private fun buildView(context: Context): View {
++        val density = context.resources.displayMetrics.density
++        fun dp(value: Int) = (value * density).toInt()
++
++        val root =
++            LinearLayout(context).apply {
++                orientation = LinearLayout.VERTICAL
++                setPadding(dp(24), dp(24), dp(24), dp(16))
++            }
++
++        titleView =
++            TextView(context).apply {
++                textSize = 18f
++                setTypeface(null, Typeface.BOLD)
++                maxLines = 1
++                ellipsize = TextUtils.TruncateAt.END
++            }
++        subtitleView =
++            TextView(context).apply {
++                textSize = 14f
++                maxLines = 1
++                ellipsize = TextUtils.TruncateAt.END
++            }
++        timeView = TextView(context).apply { textSize = 12f }
++
++        seekBar =
++            SeekBar(context).apply {
++                setOnSeekBarChangeListener(
++                    object : SeekBar.OnSeekBarChangeListener {
++                        override fun onProgressChanged(
++                            seekBar: SeekBar,
++                            progress: Int,
++                            fromUser: Boolean,
++                        ) {
++                            if (fromUser) {
++                                timeView.text = formatTime(progress.toLong(), seekBar.max.toLong())
++                            }
++                        }
++
++                        override fun onStartTrackingTouch(seekBar: SeekBar) {
++                            isDragging = true
++                        }
++
++                        override fun onStopTrackingTouch(seekBar: SeekBar) {
++                            isDragging = false
++                            seekTo(seekBar.progress.toLong())
++                        }
++                    }
++                )
++            }
++
++        prevButton = controlButton(context)
++        playButton = controlButton(context)
++        nextButton = controlButton(context)
++        val buttons =
++            LinearLayout(context).apply {
++                orientation = LinearLayout.HORIZONTAL
++                gravity = android.view.Gravity.CENTER
++                addView(prevButton)
++                addView(playButton)
++                addView(nextButton)
++            }
++
++        root.addView(titleView)
++        root.addView(subtitleView)
++        root.addView(seekBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(16) })
++        root.addView(timeView)
++        root.addView(buttons, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
++        return root
++    }
++
++    private fun controlButton(context: Context): ImageButton {
++        val size = (48 * context.resources.displayMetrics.density).toInt()
++        return ImageButton(context).apply {
++            background = null
++            scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
++            layoutParams = LinearLayout.LayoutParams(size, size)
++        }
++    }
++
++    private fun refresh() {
++        val media = currentMedia()
++        if (media == null) {
++            stopTicker()
++            dialog?.dismiss()
++            return
++        }
++
++        titleView.text = media.title
++        subtitleView.text = media.subtitle
++
++        val actions = media.playbackStateActions
++        bindButton(prevButton, actions?.prevOrCustom)
++        bindButton(playButton, actions?.playOrPause)
++        bindButton(nextButton, actions?.nextOrCustom)
++
++        val duration = media.durationMs.coerceAtLeast(1L)
++        seekBar.isEnabled = media.canBeScrubbed
++        seekBar.max = duration.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
++        if (!isDragging) {
++            seekBar.progress = media.positionMs.coerceIn(0L, duration).toInt()
++            timeView.text = formatTime(media.positionMs, duration)
++        }
++    }
++
++    private fun bindButton(button: ImageButton, action: MediaAction?) {
++        button.setImageDrawable(action?.icon)
++        button.contentDescription = action?.contentDescription
++        button.isEnabled = action?.action != null
++        button.setOnClickListener { action?.action?.run() }
++    }
++
++    private fun startTicker() {
++        val runnable =
++            object : Runnable {
++                override fun run() {
++                    refresh()
++                    handler.postDelayed(this, REFRESH_MS)
++                }
++            }
++        ticker = runnable
++        handler.post(runnable)
++    }
++
++    private fun stopTicker() {
++        ticker?.let { handler.removeCallbacks(it) }
++        ticker = null
++    }
++
++    private fun formatTime(positionMs: Long, durationMs: Long): String {
++        return "${formatOne(positionMs)} / ${formatOne(durationMs)}"
++    }
++
++    private fun formatOne(ms: Long): String {
++        val totalSeconds = (ms / 1000).coerceAtLeast(0L)
++        return "%d:%02d".format(totalSeconds / 60, totalSeconds % 60)
++    }
++
++    companion object {
++        private const val REFRESH_MS = 500L
++    }
++}
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/chips/music/ui/viewmodel/MusicChipViewModel.kt b/packages/SystemUI/src/com/android/systemui/statusbar/chips/music/ui/viewmodel/MusicChipViewModel.kt
+index 9b62b5f03ce6..e885a364672f 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/chips/music/ui/viewmodel/MusicChipViewModel.kt
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/chips/music/ui/viewmodel/MusicChipViewModel.kt
+@@ -19,14 +19,24 @@ package com.android.systemui.statusbar.chips.music.ui.viewmodel
+ import android.content.Context
+ import android.provider.Settings
+ import androidx.compose.runtime.snapshotFlow
++import com.android.internal.jank.Cuj
++import com.android.internal.logging.InstanceId
++import com.android.systemui.animation.DialogCuj
++import com.android.systemui.animation.DialogTransitionAnimator
+ import com.android.systemui.dagger.SysUISingleton
+ import com.android.systemui.dagger.qualifiers.Application
+ import com.android.systemui.dagger.qualifiers.Main
++import com.android.systemui.log.LogBuffer
+ import com.android.systemui.media.remedia.data.model.MediaDataModel
+ import com.android.systemui.media.remedia.data.repository.MediaRepository
++import com.android.systemui.statusbar.chips.StatusBarChipsLog
++import com.android.systemui.statusbar.chips.music.ui.view.MusicControlsDialogDelegate
+ import com.android.systemui.statusbar.chips.ui.model.ColorsModel
+ import com.android.systemui.statusbar.chips.ui.model.OngoingActivityChipModel
+ import com.android.systemui.statusbar.chips.ui.viewmodel.OngoingActivityChipViewModel
++import com.android.systemui.statusbar.chips.ui.viewmodel.OngoingActivityChipViewModel.Companion.createDialogLaunchOnClickCallback
++import com.android.systemui.statusbar.chips.uievents.StatusBarChipsUiEventLogger
++import com.android.systemui.statusbar.phone.SystemUIDialogFactory
+ import javax.inject.Inject
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.flow.Flow
+@@ -49,6 +59,10 @@ constructor(
+     @Application private val scope: CoroutineScope,
+     @Main private val context: Context,
+     private val mediaRepository: MediaRepository,
++    private val dialogTransitionAnimator: DialogTransitionAnimator,
++    private val dialogFactory: SystemUIDialogFactory,
++    private val uiEventLogger: StatusBarChipsUiEventLogger,
++    @StatusBarChipsLog private val logger: LogBuffer,
+ ) : OngoingActivityChipViewModel {
+ 
+     /** The first active media session, or null when nothing is playing. */
+@@ -76,20 +90,48 @@ constructor(
+         }
+ 
+     private fun MediaDataModel.toChipModel(): OngoingActivityChipModel.Active {
++        val sessionId = instanceId
+         return OngoingActivityChipModel.Active(
+             key = KEY,
+             notificationKey = null, // Not tied to a notification
+             icon = OngoingActivityChipModel.ChipIcon.SingleColorIcon(appIcon),
+             content = OngoingActivityChipModel.Content.Text(title),
+             colors = ColorsModel.SystemThemed,
+-            clickBehavior = OngoingActivityChipModel.ClickBehavior.None,
++            clickBehavior =
++                OngoingActivityChipModel.ClickBehavior.ExpandAction(
++                    createDialogLaunchOnClickCallback(
++                        dialogDelegateCreator = { context ->
++                            MusicControlsDialogDelegate(
++                                context = context,
++                                dialogFactory = dialogFactory,
++                                currentMedia = { currentSession(sessionId) },
++                                seekTo = { to -> mediaRepository.seek(sessionId, to) },
++                            )
++                        },
++                        dialogTransitionAnimator = dialogTransitionAnimator,
++                        cuj = DIALOG_CUJ,
++                        key = KEY,
++                        instanceId = sessionId,
++                        uiEventLogger = uiEventLogger,
++                        logger = logger,
++                        tag = TAG,
++                    )
++                ),
++            instanceId = sessionId,
+         )
+     }
+ 
++    /** The latest state of the session with [sessionId], or null once it is gone. */
++    private fun currentSession(sessionId: InstanceId): MediaDataModel? =
++        mediaRepository.currentMedia.firstOrNull { it.instanceId == sessionId }
++
+     companion object {
+         /** Key used as the chip identity so the island can animate updates in place. */
+         const val KEY = "MusicChip"
+ 
++        private val DIALOG_CUJ = DialogCuj(Cuj.CUJ_STATUS_BAR_LAUNCH_DIALOG_FROM_CHIP, tag = "Music")
++        private const val TAG = "MusicChipVM"
++
+         /** System setting (0 = off, 1 = on) that the Settings app writes to. */
+         const val SETTING_KEY = "music_dynamic_island_enabled"
+ 
+diff --git a/packages/SystemUI/tests/utils/src/com/android/systemui/statusbar/chips/music/ui/viewmodel/MusicChipViewModelKosmos.kt b/packages/SystemUI/tests/utils/src/com/android/systemui/statusbar/chips/music/ui/viewmodel/MusicChipViewModelKosmos.kt
+index 47538dab550e..0eef35ae56cf 100644
+--- a/packages/SystemUI/tests/utils/src/com/android/systemui/statusbar/chips/music/ui/viewmodel/MusicChipViewModelKosmos.kt
++++ b/packages/SystemUI/tests/utils/src/com/android/systemui/statusbar/chips/music/ui/viewmodel/MusicChipViewModelKosmos.kt
+@@ -19,7 +19,11 @@ package com.android.systemui.statusbar.chips.music.ui.viewmodel
+ import android.content.applicationContext
+ import com.android.systemui.kosmos.Kosmos
+ import com.android.systemui.kosmos.applicationCoroutineScope
++import com.android.systemui.animation.dialogTransitionAnimator
+ import com.android.systemui.media.remedia.data.repository.mediaRepository
++import com.android.systemui.statusbar.chips.statusBarChipsLogger
++import com.android.systemui.statusbar.chips.uievents.statusBarChipsUiEventLogger
++import com.android.systemui.statusbar.phone.systemUIDialogFactory
+ 
+ val Kosmos.musicChipViewModel: MusicChipViewModel by
+     Kosmos.Fixture {
+@@ -27,5 +31,9 @@ val Kosmos.musicChipViewModel: MusicChipViewModel by
+             scope = applicationCoroutineScope,
+             context = applicationContext,
+             mediaRepository = mediaRepository,
++            dialogTransitionAnimator = dialogTransitionAnimator,
++            dialogFactory = systemUIDialogFactory,
++            uiEventLogger = statusBarChipsUiEventLogger,
++            logger = statusBarChipsLogger,
+         )
+     }
+-- 
+2.43.0
+
